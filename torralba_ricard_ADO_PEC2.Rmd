@@ -1,0 +1,345 @@
+---
+title: "Prova d'Avaluació Continua 2"
+subtitle: "Anàlisi de dades de RNA-seq amb R Bioconductor"
+author: "Ricard Torralba Gombau"
+date: '`r format(Sys.Date(),"%e de %B, %Y")`'
+output:
+  prettydoc::html_pretty:
+    number_sections: yes
+    theme: cayman
+    toc: yes
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    df_print: paged
+  pdf_document:
+    toc: true
+    toc_depth: 2
+lang: ca
+bibliography: pac2.bib
+nocite: |
+  @love2014differential
+params:
+  samples: 292
+  seed: 05062020
+  folder: ./Data
+  file_targets: targets.csv
+  file_counts: counts.csv
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(comment = NA,
+               echo = F,
+               prompt = T,
+               message = F,
+               warning = F,
+               cache = T)
+```
+
+```{r libraries, include = F, message = F, warning = F}
+# Load packages
+library(Biobase)
+library(ggplot2)
+library(DESeq2)
+library(reshape2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(limma)
+```
+
+\newpage
+
+# Abstract
+
+In this work, a characteristic workflow for the analysis of RNA-Seq data using R software and Bioconductor packages is presented. Data analysed provides from a study in which three different types of infiltration in thyroid gland tissues is compared. Obtained results show that the expression of a considerable amount of genes is up or down-regulated depending on the type of infiltration in the tissue.
+
+# Aim of the study
+
+This study has mainly two goals:
+
+- To carry out a statistical analysis of RNA-Seq data.
+- To use the knowledge gained on the statistical analysis to write a scientific technical report
+
+# Materials
+
+In this section, all materials required to perform the RNA-seq data analysis are listed.
+
+## Software
+
+Software used to carry out required calculations is [R statistical software](https://cran.r-project.org/index.html) on its `r paste(version$major, version$minor, sep = ".")` version. Since R is a console based software, [RStudio](https://rstudio.com/) additional interface is  used in this study to enhance significantly its performance.
+
+Analysis carried out requires the use of functions not included in the basic R installation. Therefore, additional libraries or packages developed by the scientific community and containing these functions have to be imported. Most used packages are part of the [Bioconductor project](https://www.bioconductor.org/), the state-of-the-art approach to study microarrays and other omics data. 
+
+Both R and Bioconductor are open source free software.
+
+Code for running the statistical analysis can be downloaded from [GitHub](https://github.com/), a website that provides hosting for software development version control using Git. The url for the repository is: [https://github.com/ricardtorralba/torralba_gombau_ADO_PEC2.git](https://github.com/ricardtorralba/torralba_gombau_ADO_PEC2.git). File containing R code is named `torralba_ricard_ADO_PEC2.R`.
+
+## Data
+
+Presented protocol is applied on a dataset from the [Genotype Tissue Expression (GTEx)](https://www.gtexportal.org/home/) portal, the website of a project that aims to build a comprehensive public resource to study tissue-specific gene expression and regulation. 
+
+RNA-Seq analysis is carried out on a thyroid gland study in which `r params$samples` samples with three different types of infiltration are compared. Therefore, there are three different groups:
+
+```{r, results = "hide"}
+n_nit = 236
+n_sfi = 42
+n_eli = 14
+n = 30
+n_group = n/3
+```
+
+- Not infiltrated tissues (NIT), with `r n_nit` samples.
+- Small focal infiltrates (SFI), with `r n_sfi` samples.
+- Extensive lymphoid infiltrates (ELI), with `r n_eli` samples.
+
+A total of `r n` samples, `r n_group` for each group are randomly selected in order to carry out the statistical analysis.
+
+# Methods
+
+## Collection of data
+
+The first step in the process consists in importing the data and randomly selecting `r n_group` samples for each group. It is achieved with the `sample()` function, which randomly selects `r n_group` samples for each of the groups. After that, the `DESeqDataSet` object is constructed with the total of `r n` samples.
+
+```{r}
+set.seed(params$seed)
+targ = read.csv(file = file.path(params$folder, params$file_targets),
+                header = T)
+targ$Group = factor(targ$Group)
+rownames(targ) = gsub("-", ".", targ$Sample_Name)
+
+nit = targ[targ$Group == "NIT",]
+sfi = targ[targ$Group=="SFI",]
+eli = targ[targ$Group=="ELI",]
+obs_nit = sample(nrow(nit), 10, replace = F)
+obs_sfi = sample(nrow(sfi), 10, replace = F)
+obs_eli = sample(nrow(eli), 10, replace = F)
+df_nit = nit[obs_nit,]
+df_sfi = sfi[obs_sfi,]
+df_eli = eli[obs_eli,]
+coldata = rbind(df_nit, df_sfi, df_eli)
+val_coldata = coldata$Sample_Name
+vars_coldata = gsub("-", ".", val_coldata)
+
+data = read.csv(file = file.path(params$folder, params$file_counts),
+                sep = ";", header = T, row.names = 1)
+countdata = data[vars_coldata]
+rownames(countdata) = gsub("\\..*", "", rownames(countdata), fixed = F)
+countdata = countdata[, rownames(coldata)]
+
+ddsMat = DESeqDataSetFromMatrix(countData = countdata,
+                                colData = coldata,
+                                design = ~ Group)
+ddsMat
+```
+
+As it can be seen, each of the groups contains `r n_group` samples.
+
+```{r}
+summary(ddsMat$Group)
+```
+
+## Dataset pre-processing
+
+Dataset pre-processing will contain two steps, filtering and normalization.  
+
+Rows that have no information about the amount of gene expression are removed from the object in order to reduce its size. Most minimal filtering rule is applied, since only the rows having eithor zero or one count are removed from the `DESeqDataSet`. The number of rows that are still in the object after the filtering step are:
+
+```{r}
+dds = ddsMat[rowSums(counts(ddsMat)) >1,]
+nrow(dds)
+removed_rows = nrow(ddsMat) - nrow(dds)
+```
+
+Therefore, `r removed_rows` have been removed.
+
+Daya normalization is the group of techniques that allow to reduce systematic error in the samples results, so that, to the extent possible, all diferences between samples are due to biological variation within them. Normalization is carried out by using the Relative Log Expression (RLE) method @anders2010differential, by applying the `estimateSizeFactors()` function, defined in the `DESeq2` package. 
+
+```{r}
+norm_dds = estimateSizeFactors(dds)
+```
+
+## Differential Expression Analysis
+
+Differential Expression Analysis is carried out to compare the three different groups. It is performed using the `DESeq()` function of the `DESeq2` package.
+
+```{r}
+dds_res = DESeq(norm_dds, parallel = T)
+```
+
+Firstly, expression of not infiltrated tissues (NIT) is compared with small focal infiltrates (SFI). In order to be more strict with the genes that are considered to be differentially expressed, results are set to be significant only when the p-adjusted value is below 0.05. This restriction is applied to all performed comparisons. 
+
+```{r}
+res_nit.sfi = results(dds_res, contrast = c("Group", "NIT", "SFI"))
+resSig_nit.sfi = subset(res_nit.sfi, padj < 0.05)
+tab_nit.sfi = table(res_nit.sfi$padj<0.05)
+tab_nit.sfi
+```
+
+As it can be seen in the table `r tab_nit.sfi[["TRUE"]]` transcripts are significantly differently expressed between the NIT and SFI groups.
+
+To obtain the most down-regulated transcrpits, these are sort from lower to higher value of the fold-change parameter:
+
+```{r}
+kable(head(resSig_nit.sfi[order(resSig_nit.sfi$log2FoldChange),], 10),
+      caption = "Most down-regulated transcripts in the NIT-SFI comparison")
+```
+
+And to obtain the most up-regulated transcripts, results are sort from higher to lower value of the fold-change parameter:
+
+```{r}
+kable(head(resSig_nit.sfi[order(resSig_nit.sfi$log2FoldChange, decreasing = T),], 10),
+      caption = "Most up-regulated transcrpits in the NIT-SFI comparison")
+```
+
+As it can be seen in this table, only three of the fold-change values are positive. Therefore, only three of the transcriptss are significantly up-regulated from an statistic point of view when making the comparison between the NIT and SFI groups of the study.
+
+After that, not infiltrated tissues (NIT) expression is compared with extensive lymphoid infiltrates (ELI).
+
+```{r}
+res_nit.eli = results(dds_res, contrast = c("Group", "NIT", "ELI"))
+resSig_nit.eli = subset(res_nit.eli, padj < 0.05)
+tab_nit.eli = table(res_nit.eli$padj<0.05)
+tab_nit.eli
+```
+
+Previoius table shows that `r tab_nit.eli[["TRUE"]]` transcripts are significantly differently expressed between the NIT and ELI groups.
+
+In this second comparison, the most down-regulated transcrpits are:
+
+```{r}
+kable(head(resSig_nit.eli[order(resSig_nit.eli$log2FoldChange),], 10),
+      caption = "Most down-regulated transcripts in the NIT-ELI comparison")
+```
+
+And the most up-regulated:
+
+```{r}
+kable(head(resSig_nit.eli[order(resSig_nit.eli$log2FoldChange, decreasing = T),], 10),
+      caption = "Most up-regulated transcripts in the NIT-ELI comparison")
+```
+
+Finally, small focal infiltrates (SFI) are compared with extensive lymphoid infiltrates (ELI):
+
+```{r}
+res_sfi.eli = results(dds_res, contrast = c("Group", "SFI", "ELI"))
+resSig_sfi.eli = subset(res_sfi.eli, padj < 0.05)
+tab_sfi.eli = table(res_sfi.eli$padj<0.05)
+tab_sfi.eli
+```
+
+As it can be seen, `r tab_sfi.eli[["TRUE"]]` transcripts are significantly differently expressed between the SFI and ELI groups.
+
+The most down regulated transcripts in this comparison are:
+
+```{r}
+kable(head(resSig_sfi.eli[order(resSig_sfi.eli$log2FoldChange),], 10),
+      caption = "Most down-regulated transcripts in the SFI-ELI comparison")
+```
+
+And the most up-regulated:
+
+```{r}
+kable(head(resSig_sfi.eli[order(resSig_sfi.eli$log2FoldChange, decreasing = T),], 10),
+      caption = "Most up-regulated transcripts in the SFI-ELI comparison")
+```
+
+## Annotating obtained results
+
+Obtained results tables contain the Ensembl gene IDs. Gene names are more informative for interpretation. Therefore, `mapIds()` function from the Bioconductor's annotation package `AnnotationDbi` can be used in order to add the gene symbol and Entrez ID to the obtained results table.
+
+```{r}
+resSig_nit.sfi$symbol = mapIds(org.Hs.eg.db,
+                               keys = rownames(resSig_nit.sfi),
+                               column = "SYMBOL",
+                               keytype = "ENSEMBL",
+                               multiVals = "first")
+resSig_nit.sfi$entrez = mapIds(org.Hs.eg.db,
+                               keys = row.names(resSig_nit.sfi),
+                               column = "ENTREZID",
+                               keytype = "ENSEMBL",
+                               multiVals = "first")
+
+resSig_nit.eli$symbol = mapIds(org.Hs.eg.db,
+                               keys = rownames(resSig_nit.eli),
+                               column = "SYMBOL",
+                               keytype = "ENSEMBL",
+                               multiVals = "first")
+resSig_nit.eli$entrez = mapIds(org.Hs.eg.db,
+                               keys = row.names(resSig_nit.eli),
+                               column = "ENTREZID",
+                               keytype = "ENSEMBL",
+                               multiVals = "first")
+
+resSig_sfi.eli$symbol = mapIds(org.Hs.eg.db,
+                               keys = rownames(resSig_sfi.eli),
+                               column = "SYMBOL",
+                               keytype = "ENSEMBL",
+                               multiVals = "first")
+resSig_sfi.eli$entrez = mapIds(org.Hs.eg.db,
+                               keys = row.names(resSig_sfi.eli),
+                               column = "ENTREZID",
+                               keytype = "ENSEMBL",
+                               multiVals = "first")
+```
+
+Those genes that are, from an stasticial point of view, most significantly differently expressed between the not infiltrate tissues (NIT) and the extensive lymphoid infiltrates (ELI) groups, are presented with their gene symbol and Entrez ID in the following table:
+
+```{r}
+kable(head(resSig_nit.eli[order(resSig_nit.eli$padj),],10),
+      caption = "Most differently expressed genes in the NIT-ELI comparison")
+```
+
+As it can be noticed, the second and the ninth transcript in the results table has no associated gene name or Entrez ID number. This may be due to the fact that each row of the tables is actually a transcript and not a gene. Therefore, this particular gene is probably not annotated in the specified databases.
+
+Most significantly differently expressed genes between the not infiltrated tissues (NIT) and the small focal infiltrates (SFI) are presented with their gene symbol and Entrez ID in the following table:
+
+```{r}
+kable(head(resSig_nit.sfi[order(resSig_nit.sfi$padj),],10),
+      caption = "Most differently expressed genes in the NIT-SFI comparison")
+```
+
+Transcripts that are most differently expressed between the small focal infiltrates (SFI) and the extensive lymphoid infiltrates (ELI) are shown in the following table with their gene symbol and Entrez ID in the following table:
+
+```{r}
+kable(head(resSig_sfi.eli[order(resSig_sfi.eli$padj),],10),
+      caption = "Most differently expressed genes in the NIT-SFI comparison")
+```
+
+##  Multiple comparisons
+
+When performing several comparisons at the same time, it becomes interesting to analyse which genes are differently expressed in more than one comparison. The following Table shows the number of genes that have an expression level that is significantly different in two or all three comparisons carried out. A gene is considered to be differently expressed when its p-value associated to the t test is below 0.05.
+
+```{r}
+common_nit.sfi_nit.eli = intersect(rownames(resSig_nit.sfi), rownames(resSig_nit.eli))
+common_nit.sfi_sfi.eli = intersect(rownames(resSig_nit.sfi), rownames(resSig_sfi.eli))
+common_nit.eli_sfi.eli = intersect(rownames(resSig_nit.eli), rownames(resSig_sfi.eli))
+common_all = intersect(common_nit.sfi_nit.eli, rownames(resSig_sfi.eli))
+
+comp = c(length(common_nit.sfi_nit.eli), length(common_nit.sfi_sfi.eli), length(common_nit.eli_sfi.eli), length(common_all))
+multiple_comparison = data.frame("Number of genes" = comp)
+rownames(multiple_comparison) = c("NIT-SFI AND NIT-ELI", "NIT-SFI AND SFI-ELI", "NIT-ELI AND SFI-ELI", "ALL")
+kable(multiple_comparison, caption = "Number of genes differently expressed in more than one comparison")
+```
+
+Obtained results are consitent with the amount of genes that are significantly differently expressed in each comparison. Since the amount of differently expressed transcripts in the NIT-ELI and SFI-ELI is much higher than in the NIT-SFI comparison, it makes sense that when considering multiple comparisons, the number of genes that are present in both of the two first comparisons is higher.
+
+## Gene Enrichment Analysis
+
+After most differently expressed genes are found, it is interesting to study their associated functions, in order to elucidate if there is a specific biological function that is enhanced by the conditions under which each of the comparisons are carried out. Genes functions are obtained from functional annotation databases such as [Gene Ontology (GO)](http://geneontology.org/) or [Kyoto Encyclopedia of Genes and Genomes (KEGG)](https://www.kegg.jp/).
+
+Therefore, the main goal of the gene enrichment analysis is to determine if a specific biological process or metabolic pathway is significantly more present in the list of differently expressed genes than in the total genes of the organism under study. In this way, if a specific process is more present, the specific conditions in the RNA-seq analysis enhance that biological process or metabolic pathway.
+
+The first step for this analysis is to produce a list with the differently expressed genes in each of the comparisons. Since gene enrichment analyses require a minimum number of genes (some hundreds at least) to be reliable, conditions to consider a gene to be differently expressed are less restrictive, in this particular case. Therefore, minimum value for p-adjusted is increased from 0.05 to 0.1.
+
+# Results
+
+Differential Expression Analysis results show that `r tab_nit.sfi[["TRUE"]]` transcripts are differently expressed between the not infiltrated tissues (NIT) and the small focal infiltrates (SFI). Within them, most significantly down-regulated gene is MS4A1, whereas most significantly up-regulated gene is SLFNL1.
+
+Regarding the comparison analysis between the not infiltrated tissues (NIT) and extensive lymphoid infiltrates (ELI), analysis carried out shows that `r tab_nit.eli[["TRUE"]]` transcripts are differently expressed between these groups. Most significantly down-regulated gene is SCIMP. Within the ten most differently expressed genes, there is none that appears to be up-regulated.
+
+Finally, differential expression analysis shows that `r tab_sfi.eli[["TRUE"]]` transcripts are differently expressed between the small focal infiltrates (SFI) and the extensive lymphoid infiltrates (ELI). Within them, most significantly down-regulated gene is CCR6. Once again, none of the ten most significantly differently expressed genes are up-regulated.
+
+# References
+
